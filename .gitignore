@@ -1,0 +1,24 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+# Dataset
+data/*.gz
+data/*.txt
+# MQTT results
+mqtt_results/
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+# Temporary files
+.vscode/
+*.log
+benchmark_results/
+FULL_405_TRIALS.csv
+HYBRID_075_TRIALS.csv
+tools/toxiproxy/*.exe
