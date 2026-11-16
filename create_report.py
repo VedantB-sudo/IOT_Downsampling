@@ -1,829 +1,276 @@
 
-"""
-Create a six-metric Excel comparison report
-and a four-panel graph.
-
-Input:
-    benchmark_comparison.csv
-
-Outputs:
-    comparison_report.xlsx
-    comparison_graph.png
-"""
-
 import argparse
 from pathlib import Path
 
-import matplotlib
-matplotlib.use("Agg")
-
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import xlsxwriter
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 
-# ============================================================
-# 1. ALGORITHMS AND METRICS
-# ============================================================
-
-ALGORITHMS = {
-    "uniform": (
-        "Uniform Decimation",
-        "#2563EB"
-    ),
-    "std_dev": (
-        "Standard Deviation",
-        "#64748B"
-    ),
-    "hp_pe": (
-        "HP-PE",
-        "#0D9488"
-    ),
-    "hp_energy": (
-        "HP-Energy",
-        "#D97706"
-    ),
-    "hybrid": (
-        "Hybrid HP-PE + HP-Energy",
-        "#9333EA"
-    )
+LABELS = {
+    "uniform": "Uniform Decimation",
+    "std_dev": "Standard Deviation",
+    "hp_pe": "HP-PE",
+    "hp_energy": "HP-Energy",
+    "hybrid": "Hybrid"
 }
 
-METRICS = [
-    (
-        "data_reduction_pct",
-        "Data Reduction (%)",
-        "higher"
-    ),
-    (
-        "important_data_retained_pct",
-        "Important Data Retained (%)",
-        "higher"
-    ),
-    (
-        "event_recall_pct",
-        "Synthetic Event Recall (%)",
-        "higher"
-    ),
-    (
-        "F2_score",
-        "Synthetic F2-Score",
-        "higher"
-    ),
-    (
-        "PRDN_pct",
-        "PRDN (%)",
-        "lower"
-    ),
-    (
-        "selection_time_ms",
-        "Selection Time (ms)",
-        "lower"
-    )
-]
+METRICS = {
+    "PRDN_pct_mean": "PRDN (%)",
+    "P99_retained_pct_mean": "P99 Retained (%)"
+}
 
 
-# ============================================================
-# 2. READ RESULTS
-# ============================================================
+def load_results(folder):
+    summary_file = folder / "benchmark_summary.csv"
+    activity_file = folder / "benchmark_by_activity.csv"
 
-def read_results(folder):
+    if not summary_file.exists():
+        raise FileNotFoundError(f"Missing file: {summary_file}")
 
-    source = folder / "benchmark_comparison.csv"
+    summary = pd.read_csv(summary_file)
 
-    if not source.is_file():
-        raise FileNotFoundError(
-            f"Cannot find {source}. "
-            "Run benchmark_all.py first."
-        )
-
-    df = pd.read_csv(source)
-
-    expected = (
-        ["algorithm"]
-        + [key for key, _, _ in METRICS]
-    )
-
-    missing = [
-        col for col in expected
-        if col not in df.columns
+    required = [
+        "sensor_type", "target_reduction_pct", "algorithm",
+        "PRDN_pct_mean", "PRDN_pct_std",
+        "RMSE_mean", "MAE_mean",
+        "P95_retained_pct_mean", "P99_retained_pct_mean",
+        "selection_time_ms_mean", "window_count"
     ]
 
+    missing = [col for col in required if col not in summary.columns]
     if missing:
-        raise ValueError(
-            "CSV is missing the six-metric columns: "
-            + ", ".join(missing)
-        )
+        raise ValueError(f"Missing columns: {missing}")
 
-    df = df[
-        df["algorithm"].isin(ALGORITHMS)
-    ].copy()
-
-    if df.empty:
-        raise ValueError(
-            "No expected algorithm names found in the CSV."
-        )
-
-    for metric, _, _ in METRICS:
-        df[metric] = pd.to_numeric(
-            df[metric],
-            errors="coerce"
-        )
-
-    essential = [
-        "data_reduction_pct",
-        "important_data_retained_pct",
-        "PRDN_pct",
-        "selection_time_ms"
-    ]
-
-    if df[essential].isna().any().any():
-        raise ValueError(
-            "Missing required numeric benchmark measurements."
-        )
-
-    df["reduction_group"] = (
-        df["data_reduction_pct"].round(2)
+    activity = (
+        pd.read_csv(activity_file)
+        if activity_file.exists()
+        else pd.DataFrame()
     )
 
-    df["order"] = df["algorithm"].map({
-        code: i
-        for i, code in enumerate(ALGORITHMS)
-    })
-
-    if df.duplicated(
-        ["algorithm", "reduction_group"]
-    ).any():
-        raise ValueError(
-            "Duplicate algorithm/reduction combinations found."
-        )
-
-    return df.sort_values(
-        ["reduction_group", "order"]
-    ).reset_index(drop=True)
+    return summary, activity
 
 
-# ============================================================
-# 3. GENERATE FOUR COMPARISON GRAPHS
-# ============================================================
+def overall_results(df):
+    rows = []
 
-def create_image(df, path):
+    for (method, reduction), group in df.groupby(
+        ["algorithm", "target_reduction_pct"]
+    ):
+        counts = group["window_count"].to_numpy(dtype=float)
 
-    plt.rcParams.update({
-        "font.size": 10
-    })
+        row = {
+            "Algorithm": LABELS.get(method, method),
+            "Reduction (%)": reduction,
+            "PRDN (%)": np.average(group["PRDN_pct_mean"], weights=counts),
+            "P95 Retained (%)": np.average(
+                group["P95_retained_pct_mean"], weights=counts
+            ),
+            "P99 Retained (%)": np.average(
+                group["P99_retained_pct_mean"], weights=counts
+            ),
+            "Time (ms)": np.average(
+                group["selection_time_ms_mean"], weights=counts
+            ),
+            "Sensor Channels": len(group)
+        }
 
-    fig, axes = plt.subplots(
-        2,
-        2,
-        figsize=(14.5, 8.5)
+        rows.append(row)
+
+    return pd.DataFrame(rows).sort_values(
+        ["Reduction (%)", "Algorithm"]
     )
 
-    panels = [
-        (
-            "important_data_retained_pct",
-            "Important Readings Preserved",
-            "Retained Important Data (%)"
-        ),
-        (
-            "F2_score",
-            "Synthetic Event F2-Score",
-            "F2-Score (0-1)"
-        ),
-        (
-            "PRDN_pct",
-            "Reconstruction Distortion",
-            "PRDN (%)"
-        ),
-        (
-            "selection_time_ms",
-            "Algorithm Processing Time",
-            "Selection Time (ms)"
-        )
-    ]
 
-    reductions = sorted(
-        df["reduction_group"].unique()
-    )
+def make_overview(df):
+    rows = []
 
-    for ax, (
-        metric,
-        title,
-        y_label
-    ) in zip(axes.flat, panels):
+    for (sensor, reduction), group in df.groupby(
+        ["sensor_type", "target_reduction_pct"]
+    ):
+        def best(column, highest=False):
+            index = group[column].idxmax() if highest else group[column].idxmin()
+            return LABELS.get(group.loc[index, "algorithm"],
+                              group.loc[index, "algorithm"])
 
-        ax.set_title(
-            title,
-            fontsize=12,
-            weight="bold",
-            loc="left"
-        )
+        rows.append({
+            "Sensor": sensor,
+            "Reduction (%)": reduction,
+            "Lowest PRDN": best("PRDN_pct_mean"),
+            "Best P95": best("P95_retained_pct_mean", True),
+            "Best P99": best("P99_retained_pct_mean", True),
+            "Fastest": best("selection_time_ms_mean")
+        })
 
-        ax.set_xlabel(
-            "Data Removed (%)"
-        )
+    return pd.DataFrame(rows)
 
-        ax.set_ylabel(y_label)
 
-        ax.set_xticks(reductions)
+def make_graphs(df, folder):
+    plots = folder / "plots"
+    plots.mkdir(exist_ok=True)
 
-        ax.set_xlim(
-            min(reductions) - 2,
-            max(reductions) + 2
-        )
+    for sensor, group in df.groupby("sensor_type"):
+        fig, axes = plt.subplots(1, 2, figsize=(13, 5))
 
-        ax.grid(alpha=0.20)
+        for ax, (metric, title) in zip(axes, METRICS.items()):
+            for method, name in LABELS.items():
+                rows = group[group["algorithm"] == method]
+                rows = rows.sort_values("target_reduction_pct")
 
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-
-        available = False
-
-        for code, (name, color) in ALGORITHMS.items():
-
-            part = df.loc[
-                df["algorithm"] == code
-            ].sort_values(
-                "reduction_group"
-            )
-
-            if part[metric].notna().any():
-
-                available = True
+                if rows.empty:
+                    continue
 
                 ax.plot(
-                    part["reduction_group"],
-                    part[metric],
+                    rows["target_reduction_pct"],
+                    rows[metric],
                     marker="o",
-                    linewidth=2.2,
-                    markersize=6,
-                    color=color,
+                    linewidth=2,
                     label=name
                 )
 
-        if not available:
+            ax.set_title(title)
+            ax.set_xlabel("Data Reduction (%)")
+            ax.set_ylabel(title)
+            ax.set_xticks(sorted(group["target_reduction_pct"].unique()))
+            ax.grid(alpha=0.3)
 
-            ax.text(
-                0.5,
-                0.50,
-                "Not available - run with "
-                "--synthetic-events 12",
-                transform=ax.transAxes,
-                ha="center",
-                va="center",
-                fontsize=10,
-                color="#64748B"
-            )
+        axes[0].legend(fontsize=8)
+        fig.suptitle(f"PAMAP2 - {sensor}")
+        fig.tight_layout()
 
-        ax.set_ylim(bottom=0)
+        fig.savefig(plots / f"{sensor}_comparison.png", dpi=160)
+        plt.close(fig)
 
-        if metric == "F2_score":
-            ax.set_ylim(0, 1.05)
-
-        if metric == "important_data_retained_pct":
-            ax.set_ylim(0, 105)
-
-    # Shared algorithm legend.
-    legend_handles = []
-    legend_labels = []
-
-    for ax in axes.flat:
-
-        handles, labels = ax.get_legend_handles_labels()
-
-        if handles:
-            legend_handles = handles
-            legend_labels = labels
-            break
-
-    fig.suptitle(
-        "IoT Downsampling | Six-Metric Evaluation",
-        fontsize=18,
-        weight="bold",
-        y=0.975
-    )
-
-    fig.legend(
-        legend_handles,
-        legend_labels,
-        loc="lower center",
-        ncol=3,
-        bbox_to_anchor=(0.5, 0.035),
-        frameon=False
-    )
-
-    fig.text(
-        0.5,
-        0.01,
-        "Important readings = top 5% absolute changes | "
-        "F2 uses injected events only | "
-        "No network measurements",
-        ha="center",
-        color="#64748B",
-        fontsize=9
-    )
-
-    fig.tight_layout(
-        rect=[0.02, 0.12, 0.98, 0.935],
-        w_pad=2,
-        h_pad=2
-    )
-
-    fig.savefig(
-        path,
-        dpi=190,
-        facecolor="white"
-    )
-
-    plt.close(fig)
+    return plots
 
 
-# ============================================================
-# 4. CREATE EXCEL WORKBOOK
-# ============================================================
+def format_sheet(writer, name, df):
+    sheet = writer.sheets[name]
+    workbook = writer.book
 
-def create_workbook(df, plot_path, path):
-
-    book = xlsxwriter.Workbook(
-        str(path)
-    )
-
-    book.set_properties({
-        "title": "IoT Downsampling | Six-Metric Comparison"
-    })
-
-    # ========================================================
-    # EXCEL STYLES
-    # ========================================================
-
-    dark = "#17324F"
-    teal = "#087D8B"
-
-    title = book.add_format({
+    header = workbook.add_format({
         "bold": True,
-        "font_size": 18,
-        "font_color": "#FFFFFF",
-        "bg_color": dark,
-        "valign": "vcenter"
+        "font_color": "white",
+        "bg_color": "#17324F",
+        "border": 1,
+        "text_wrap": True
     })
 
-    header = book.add_format({
-        "bold": True,
-        "font_color": "#FFFFFF",
-        "bg_color": teal,
-        "text_wrap": True,
-        "valign": "vcenter"
-    })
+    number = workbook.add_format({"num_format": "0.000"})
 
-    heading = book.add_format({
-        "bold": True,
-        "font_size": 12,
-        "font_color": dark
-    })
+    for col, title in enumerate(df.columns):
+        sheet.write(0, col, title, header)
 
-    note = book.add_format({
-        "font_color": "#475569",
-        "italic": True,
-        "text_wrap": True,
-        "valign": "vcenter"
-    })
+        width = min(max(len(str(title)) + 4, 17), 35)
+        sheet.set_column(col, col, width)
 
-    text_fmt = book.add_format({
-        "font_color": "#1F2937"
-    })
+        if pd.api.types.is_numeric_dtype(df.iloc[:, col]):
+            sheet.set_column(col, col, width, number)
 
-    number = book.add_format({
-        "num_format": "0.000"
-    })
+    sheet.set_row(0, 30)
+    sheet.freeze_panes(1, 0)
+    sheet.hide_gridlines(2)
 
-    percentage = book.add_format({
-        "num_format": '0.0"%"'
-    })
+    if not df.empty:
+        sheet.autofilter(0, 0, len(df), len(df.columns) - 1)
 
-    green = book.add_format({
-        "bold": True,
-        "bg_color": "#DDF2E6",
-        "font_color": "#166534",
-        "num_format": "0.000"
-    })
 
-    blue = book.add_format({
-        "bold": True,
-        "bg_color": "#DBEAFE",
-        "font_color": "#1D4ED8",
-        "num_format": "0.000"
-    })
+def create_excel(summary, activity, plots, folder):
+    overview = make_overview(summary)
+    overall = overall_results(summary)
 
-    amber = book.add_format({
-        "bold": True,
-        "bg_color": "#FEF3C7",
-        "font_color": "#92400E",
-        "num_format": "0.000"
-    })
-
-    # ========================================================
-    # SHEET 1: SUMMARY
-    # ========================================================
-
-    summary = book.add_worksheet(
-        "Summary"
+    details = summary.copy()
+    details["algorithm"] = details["algorithm"].replace(LABELS)
+    details = details.sort_values(
+        ["sensor_type", "target_reduction_pct", "algorithm"]
     )
 
-    summary.hide_gridlines(2)
-    summary.set_tab_color(teal)
-
-    summary.set_column("A:A", 18)
-    summary.set_column("B:E", 35)
-
-    summary.set_row(0, 30)
-
-    summary.merge_range(
-        "A1:E2",
-        "DOWNSAMPLING | SUMMARY",
-        title
-    )
-
-    summary.merge_range(
-        "A3:E3",
-        "Each row compares algorithms at the same "
-        "data-reduction percentage.",
-        note
-    )
-
-    summary_headers = [
-        "Data Removed (%)",
-        "Most Important Data Kept",
-        "Best Event F2",
-        "Lowest Distortion (PRDN)",
-        "Fastest Selection"
-    ]
-
-    summary.write_row(
-        5,
-        0,
-        summary_headers,
-        header
-    )
-
-    summary.set_row(5, 36)
-
-    has_events = df["F2_score"].notna().any()
-
-    for row, (
-        reduction,
-        group
-    ) in enumerate(
-        df.groupby("reduction_group", sort=True),
-        start=6
-    ):
-
-        # Best important-data retention.
-        important_winner = group.loc[
-            group["important_data_retained_pct"].idxmax()
-        ]
-
-        # Lowest PRDN.
-        distortion_winner = group.loc[
-            group["PRDN_pct"].idxmin()
-        ]
-
-        # Fastest algorithm.
-        fastest = group.loc[
-            group["selection_time_ms"].idxmin()
-        ]
-
-        summary.write_number(
-            row,
-            0,
-            float(reduction),
-            percentage
-        )
-
-        summary.write(
-            row,
-            1,
-            ALGORITHMS[
-                important_winner["algorithm"]
-            ][0],
-            text_fmt
-        )
-
-        # Best synthetic F2.
-        f2_rows = group.dropna(
-            subset=["F2_score"]
-        )
-
-        if not f2_rows.empty:
-
-            f2_winner = f2_rows.loc[
-                f2_rows["F2_score"].idxmax()
-            ]
-
-            summary.write(
-                row,
-                2,
-                ALGORITHMS[
-                    f2_winner["algorithm"]
-                ][0],
-                text_fmt
-            )
-
-        else:
-
-            summary.write(
-                row,
-                2,
-                "Not measured",
-                note
-            )
-
-        summary.write(
-            row,
-            3,
-            ALGORITHMS[
-                distortion_winner["algorithm"]
-            ][0],
-            text_fmt
-        )
-
-        summary.write(
-            row,
-            4,
-            ALGORITHMS[
-                fastest["algorithm"]
-            ][0],
-            text_fmt
-        )
-
-    # Explanation.
-    summary.write(
-        "A12",
-        "HOW TO INTERPRET",
-        heading
-    )
-
-    summary.merge_range(
-        "A13:E14",
-        "Important Data Retained: fraction of readings "
-        "in the top 5% of absolute changes that were kept. "
-        "This is a proxy, not labelled faults.",
-        note
-    )
-
-    summary.merge_range(
-        "A16:E17",
-        "Event Recall and F2: measured using injected "
-        "labelled events and a fixed detector. "
-        "They are not real machine-fault scores.",
-        note
-    )
-
-    summary.merge_range(
-        "A19:E20",
-        "PRDN and processing time: lower is better. "
-        "Processing time measures offline algorithm "
-        "selection, not network latency.",
-        note
-    )
-
-    if not has_events:
-
-        summary.merge_range(
-            "A22:E23",
-            "To populate Event Recall and F2, rerun "
-            "benchmark_all.py with --synthetic-events 12.",
-            note
-        )
-
-    # ========================================================
-    # SHEET 2: DETAILED RESULTS
-    # ========================================================
-
-    details = book.add_worksheet(
-        "Detailed Results"
-    )
-
-    details.hide_gridlines(2)
-    details.set_tab_color("#64748B")
-
-    details.freeze_panes(5, 2)
-
-    details.set_column("A:A", 32)
-    details.set_column("B:G", 22)
-
-    details.merge_range(
-        "A1:G2",
-        "SIX-METRIC COMPARISON",
-        title
-    )
-
-    details.merge_range(
-        "A3:G3",
-        "Green = best retention / lowest distortion; "
-        "Amber = best event scores; "
-        "Blue = fastest (within each reduction level).",
-        note
-    )
-
-    headings = [
-        "Algorithm",
-        "Data Reduction (%)",
-        "Important Data Retained (%)",
-        "Event Recall (%)",
-        "F2-Score",
-        "PRDN (%)",
-        "Selection Time (ms)"
-    ]
-
-    details.write_row(
-        4,
-        0,
-        headings,
-        header
-    )
-
-    details.set_row(4, 36)
-
-    details.autofilter(
-        4,
-        0,
-        4 + len(df),
-        6
-    )
-
-    # Determine best values within each reduction level.
-    group_best = {}
-
-    for metric, _, direction in METRICS[1:]:
-
-        grouped = df.groupby(
-            "reduction_group"
-        )[metric]
-
-        group_best[metric] = grouped.transform(
-            "max" if direction == "higher" else "min"
-        )
-
-    display = [
-        key for key, _, _ in METRICS
-    ]
-
-    for idx, record in df.iterrows():
-
-        out_row = 5 + idx
-
-        details.write(
-            out_row,
-            0,
-            ALGORITHMS[
-                record["algorithm"]
-            ][0],
-            text_fmt
-        )
-
-        for col, metric in enumerate(
-            display,
-            start=1
-        ):
-
-            value = record[metric]
-
-            if pd.isna(value):
-
-                details.write(
-                    out_row,
-                    col,
-                    "N/A",
-                    note
-                )
-
-                continue
-
-            if metric == "data_reduction_pct":
-
-                chosen_fmt = percentage
-
-            elif np.isclose(
-                value,
-                group_best[metric].iloc[idx],
-                rtol=1e-9,
-                atol=1e-12
-            ):
-
-                if metric == "selection_time_ms":
-                    chosen_fmt = blue
-
-                elif metric in (
-                    "event_recall_pct",
-                    "F2_score"
-                ):
-                    chosen_fmt = amber
-
-                else:
-                    chosen_fmt = green
-
-            else:
-                chosen_fmt = number
-
-            details.write_number(
-                out_row,
-                col,
-                float(value),
-                chosen_fmt
-            )
-
-    # ========================================================
-    # SHEET 3: GRAPHS
-    # ========================================================
-
-    graphs = book.add_worksheet(
-        "Graphs"
-    )
-
-    graphs.hide_gridlines(2)
-    graphs.set_tab_color("#9333EA")
-
-    graphs.set_column(
-        "A:N",
-        13
-    )
-
-    graphs.merge_range(
-        "A1:N2",
-        "FOUR ESSENTIAL PERFORMANCE GRAPHS",
-        title
-    )
-
-    graphs.insert_image(
-        "A4",
-        str(plot_path),
-        {
-            "x_scale": 0.67,
-            "y_scale": 0.67
+    if not activity.empty and "algorithm" in activity.columns:
+        activity = activity.copy()
+        activity["algorithm"] = activity["algorithm"].replace(LABELS)
+
+    output = folder / "full_dataset_report.xlsx"
+
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        sheets = {
+            "Overview": overview,
+            "Overall Comparison": overall,
+            "Sensor Results": details
         }
-    )
 
-    # Save workbook.
-    book.close()
+        if not activity.empty:
+            sheets["Activity Results"] = activity
 
+        for name, frame in sheets.items():
+            frame.round(3).to_excel(writer, sheet_name=name, index=False)
+            format_sheet(writer, name, frame)
 
-# ============================================================
-# 5. MAIN PROGRAM
-# ============================================================
+        workbook = writer.book
+        graphs = workbook.add_worksheet("Graphs")
+        graphs.hide_gridlines(2)
+        graphs.set_column("A:U", 12)
+
+        heading = workbook.add_format({
+            "bold": True,
+            "font_size": 16,
+            "font_color": "#17324F"
+        })
+
+        graphs.write("B2", "PAMAP2 Downsampling Comparison", heading)
+
+        row = 4
+
+        for sensor in sorted(summary["sensor_type"].unique()):
+            image = plots / f"{sensor}_comparison.png"
+            graphs.insert_image(row, 1, str(image), {
+                "x_scale": 0.75,
+                "y_scale": 0.75
+            })
+            row += 33
+
+        notes = workbook.add_worksheet("Notes")
+        notes.set_column("A:A", 28)
+        notes.set_column("B:B", 100)
+
+        notes.write_row(0, 0, ["Metric", "Meaning"])
+
+        explanations = [
+            ("PRDN", "Mean-normalised reconstruction error; lower is better."),
+            ("RMSE", "Root mean squared reconstruction error."),
+            ("MAE", "Mean absolute reconstruction error."),
+            ("P95/P99", "Exact-index retention of high-change readings, not labelled event recall."),
+            ("Processing Time", "Offline algorithm selection time, not network latency."),
+            ("Overall Comparison", "Window-count-weighted average across sensor channels."),
+            ("Dataset", "PAMAP2 Protocol and Optional recordings; eligible activity windows."),
+            ("Network", "No MQTT or real network measurements.")
+        ]
+
+        for row, item in enumerate(explanations, start=1):
+            notes.write_row(row, 0, item)
+
+    return output
+
 
 def main():
-
-    parser = argparse.ArgumentParser(
-        description=(
-            "Create the six-metric Excel and graph report"
-        )
-    )
-
+    parser = argparse.ArgumentParser()
     parser.add_argument(
         "--results",
-        default=(
-            "benchmark_results/"
-            "intel_mote_1_temperature_synthetic_events_12"
-        )
+        default="benchmark_results/pamap2/full_dataset"
     )
-
     args = parser.parse_args()
 
     folder = Path(args.results)
+    summary, activity = load_results(folder)
 
-    # Load benchmark CSV.
-    data = read_results(folder)
+    plots = make_graphs(summary, folder)
+    report = create_excel(summary, activity, plots, folder)
 
-    # Output paths.
-    plot_file = folder / "comparison_graph.png"
-
-    workbook_file = (
-        folder / "comparison_report.xlsx"
-    )
-
-    # Create graph.
-    create_image(
-        data,
-        plot_file
-    )
-
-    # Create Excel report.
-    create_workbook(
-        data,
-        plot_file,
-        workbook_file
-    )
-
-    print("\nREPORT GENERATED SUCCESSFULLY")
-
-    print(
-        f"\nExcel: {workbook_file.resolve()}"
-    )
-
-    print(
-        f"Graph: {plot_file.resolve()}"
-    )
+    print("\nFULL DATASET REPORT CREATED")
+    print(f"Excel: {report.resolve()}")
+    print(f"Graphs: {plots.resolve()}")
+    print(f"Summary rows: {len(summary)}")
 
 
 if __name__ == "__main__":

@@ -1,60 +1,28 @@
-
-"""Connect individual algorithms to the benchmark."""
-
-from . import (
-    uniform_decimation,
-    standard_deviation,
-    hp_pe,
-    hp_energy,
-    hybrid
-)
+from . import uniform_decimation, standard_deviation, hp_pe, hp_energy, hybrid, spaced_hybrid
 
 
-METHODS = [
-    "uniform",
-    "std_dev",
-    "hp_pe",
-    "hp_energy",
-    "hybrid"
-]
+ALGORITHMS = {
+    "uniform": uniform_decimation.select_samples,
+    "std_dev": standard_deviation.select_samples,
+    "hp_pe": hp_pe.select_samples,
+    "hp_energy": hp_energy.select_samples,
+    "hybrid": hybrid.select_samples,
+    "spaced_hybrid": spaced_hybrid.select_samples
+}
+
+METHODS = list(ALGORITHMS)
 
 
-def choose_samples(
-    x,
-    method,
-    keep,
-    window=48,
-    chunk=256,
-    alpha=0.1,
-    pe_weight=0.5
-):
+def choose_samples(x, method, keep, window=48, chunk=256, alpha=0.1, pe_weight=0.5):
+    if method not in ALGORITHMS:
+        raise ValueError(f"Unknown algorithm: {method}")
 
     if method == "uniform":
-        return uniform_decimation.select_samples(
-            x, keep
-        )
-
+        return ALGORITHMS[method](x, keep)
     if method == "std_dev":
-        return standard_deviation.select_samples(
-            x, keep, window, chunk
-        )
+        return ALGORITHMS[method](x, keep, window, chunk)
 
-    if method == "hp_pe":
-        return hp_pe.select_samples(
-            x, keep, window, chunk, alpha
-        )
+    if method in ("hybrid", "spaced_hybrid"):
+        return ALGORITHMS[method](x, keep, window, chunk, alpha, pe_weight)
 
-    if method == "hp_energy":
-        return hp_energy.select_samples(
-            x, keep, window, chunk, alpha
-        )
-
-    if method == "hybrid":
-        return hybrid.select_samples(
-            x, keep, window, chunk,
-            alpha, pe_weight
-        )
-
-    raise ValueError(
-        f"Unknown algorithm: {method}"
-    )
+    return ALGORITHMS[method](x, keep, window, chunk, alpha)

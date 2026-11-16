@@ -4,21 +4,28 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+
 # Dataset
+data/PAMAP2_Dataset/
 data/*.gz
 data/*.txt
-# MQTT results
+
+# Benchmark results
+benchmark_results/
 mqtt_results/
+FULL_405_TRIALS.csv
+HYBRID_075_TRIALS.csv
+
 # Secrets
 .env
 .env.*
 !.env.example
 *.pem
 *.key
+
 # Temporary files
 .vscode/
 *.log
-benchmark_results/
-FULL_405_TRIALS.csv
-HYBRID_075_TRIALS.csv
+
+# Tools
 tools/toxiproxy/*.exe

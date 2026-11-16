@@ -1,304 +1,98 @@
 
-"""
-Comparison table generator for IoT downsampling.
-
-Reads:
-    benchmark_comparison.csv
-
-Generates:
-    comparison_table.csv
-    comparison_table.md
-"""
-
 import argparse
 from pathlib import Path
 import pandas as pd
 
-
-ORDER = [
-    "uniform",
-    "std_dev",
-    "hp_pe",
-    "hp_energy",
-    "hybrid"
-]
 
 LABELS = {
     "uniform": "Uniform Decimation",
     "std_dev": "Standard Deviation",
     "hp_pe": "HP-PE",
     "hp_energy": "HP-Energy",
-    "hybrid": "Hybrid HP-PE + HP-Energy"
+    "hybrid": "Hybrid"
 }
 
-NUMERIC_COLS = [
-    "target_retained_pct",
-    "data_reduction_pct",
-    "RMSE",
-    "MAE",
-    "PRDN_pct",
-    "selection_time_ms",
-    "synthetic_event_recall",
-    "synthetic_F1",
-    "synthetic_F2"
-]
+COLUMNS = {
+    "algorithm": "Algorithm",
+    "data_reduction_pct": "Reduction (%)",
+    "RMSE": "RMSE",
+    "MAE": "MAE",
+    "PRDN_pct": "PRDN (%)",
+    "P95_retained_pct": "P95 Retained (%)",
+    "P99_retained_pct": "P99 Retained (%)",
+    "selection_time_ms": "Time (ms)"
+}
 
 
-# ==========================================================
-# 1. FORMAT MARKDOWN TABLE
-# ==========================================================
-
-def md_table(frame, cols, headers):
-
+def make_markdown(df):
     lines = [
-        "| " + " | ".join(headers) + " |",
-        "| " + " | ".join(
-            "---" for _ in headers
-        ) + " |"
+        "| " + " | ".join(df.columns) + " |",
+        "| " + " | ".join(["---"] * len(df.columns)) + " |"
     ]
 
-    for _, row in frame.iterrows():
-
-        formatted = []
-
-        for col in cols:
-
-            value = row[col]
-
-            if pd.isna(value):
-                formatted.append("—")
-
-            elif col in NUMERIC_COLS:
-                formatted.append(
-                    f"{float(value):.3f}"
-                )
-
-            else:
-                formatted.append(str(value))
-
-        lines.append(
-            "| " + " | ".join(formatted) + " |"
-        )
+    for row in df.itertuples(index=False, name=None):
+        values = [
+            f"{value:.3f}" if isinstance(value, (int, float)) else str(value)
+            for value in row
+        ]
+        lines.append("| " + " | ".join(values) + " |")
 
     return "\n".join(lines)
 
 
-# ==========================================================
-# 2. MAIN TABLE GENERATOR
-# ==========================================================
-
 def main():
-
-    parser = argparse.ArgumentParser(
-        description="Create benchmark comparison tables"
-    )
-
+    parser = argparse.ArgumentParser()
     parser.add_argument(
         "--results",
-        default="benchmark_results/intel_mote_1_temperature"
+        default="benchmark_results/pamap2/subject101/activity4"
     )
-
     args = parser.parse_args()
 
-    results = Path(args.results)
+    folder = Path(args.results)
+    source = folder / "benchmark_comparison.csv"
 
-    infile = results / "benchmark_comparison.csv"
+    if not source.exists():
+        parser.error(f"Results not found: {source}")
 
-    if not infile.is_file():
-        parser.error(
-            f"Missing benchmark results: {infile}"
-        )
+    df = pd.read_csv(source)
 
-    df = pd.read_csv(infile)
-
-    required = [
-        "algorithm",
-        "target_retained_pct",
-        "data_reduction_pct",
-        "RMSE",
-        "MAE",
-        "PRDN_pct",
-        "selection_time_ms"
-    ]
-
-    missing = [
-        col for col in required
-        if col not in df.columns
-    ]
-
+    missing = [c for c in COLUMNS if c not in df.columns]
     if missing:
-        parser.error(
-            f"Missing columns: {', '.join(missing)}"
-        )
+        parser.error(f"Missing columns: {missing}")
 
-    for col in NUMERIC_COLS:
-        if col in df.columns:
-            df[col] = pd.to_numeric(
-                df[col],
-                errors="coerce"
-            )
+    df["algorithm"] = df["algorithm"].replace(LABELS)
+    df = df.sort_values(["sensor_type", "target_reduction_pct", "algorithm"])
 
-    df["algorithm_name"] = (
-        df["algorithm"]
-        .map(LABELS)
-        .fillna(df["algorithm"])
-    )
+    table = df[list(COLUMNS)].rename(columns=COLUMNS)
+    table = table.round(3)
+    table.to_csv(folder / "comparison_table.csv", index=False)
 
-    df["method_order"] = (
-        df["algorithm"]
-        .map({
-            name: i
-            for i, name in enumerate(ORDER)
-        })
-        .fillna(99)
-    )
+    sections = ["# PAMAP2 Downsampling Comparison", ""]
 
-    df = df.sort_values(
-        ["target_retained_pct", "method_order"],
-        ascending=[False, True]
-    )
-
-    event_columns = [
-        "synthetic_event_recall",
-        "synthetic_F1",
-        "synthetic_F2"
-    ]
-
-    include_event = any(
-        col in df.columns and df[col].notna().any()
-        for col in event_columns
-    )
-
-    cols = [
-        "algorithm_name",
-        "data_reduction_pct",
-        "RMSE",
-        "MAE",
-        "PRDN_pct",
-        "selection_time_ms"
-    ]
-
-    headers = [
-        "Algorithm",
-        "Reduction %",
-        "RMSE",
-        "MAE",
-        "PRDN %",
-        "Time (ms)"
-    ]
-
-    if include_event:
-
-        for col, title in [
-            ("synthetic_event_recall", "Synthetic Recall"),
-            ("synthetic_F1", "Synthetic F1"),
-            ("synthetic_F2", "Synthetic F2")
-        ]:
-
-            if col in df.columns:
-                cols.append(col)
-                headers.append(title)
-
-    # ======================================================
-    # EXPORT CSV
-    # ======================================================
-
-    export = df[
-        ["target_retained_pct"] + cols
-    ].copy()
-
-    csv_out = results / "comparison_table.csv"
-
-    export.to_csv(
-        csv_out,
-        index=False
-    )
-
-    # ======================================================
-    # CREATE MARKDOWN TABLES
-    # ======================================================
-
-    sections = [
-        "# IoT Downsampling Benchmark Comparison",
-        "",
-        "Lower RMSE, MAE, PRDN and processing time "
-        "are better. Higher recall, F1 and F2 "
-        "are better.",
-        ""
-    ]
-
-    for retention, group in df.groupby(
-        "target_retained_pct",
-        sort=False
+    for (sensor, reduction), group in df.groupby(
+        ["sensor_type", "target_reduction_pct"], sort=True
     ):
-
-        sections.append(
-            f"## {retention:g}% Retained "
-            f"({100 - retention:g}% Target Reduction)"
-        )
-
+        sections.append(f"## {sensor} - {reduction}% Reduction")
+        sections.append("")
+        sections.append(make_markdown(
+            group[list(COLUMNS)].rename(columns=COLUMNS).round(3)
+        ))
         sections.append("")
 
-        sections.append(
-            md_table(
-                group,
-                cols,
-                headers
-            )
-        )
-
-        sections.append("")
-
-        best_rmse = group.loc[
-            group["RMSE"].idxmin(),
-            "algorithm_name"
-        ]
-
-        sections.append(
-            f"**Lowest RMSE:** {best_rmse}."
-        )
-
-        if (
-            "synthetic_F2" in group.columns
-            and group["synthetic_F2"].notna().any()
-        ):
-
-            best_f2 = group.loc[
-                group["synthetic_F2"].idxmax(),
-                "algorithm_name"
-            ]
-
-            sections.append(
-                f"**Highest Synthetic F2:** {best_f2}."
-            )
-
+        best = group.loc[group["PRDN_pct"].idxmin(), "algorithm"]
+        sections.append(f"Lowest PRDN: {best}")
         sections.append("")
 
     sections.append(
-        "*Synthetic event scores are proxy measurements "
-        "using injected events and a simple detector, "
-        "not real downstream classifier performance. "
-        "No MQTT or PID results are included.*"
+        "P95/P99 show exact retention of high-change readings, "
+        "not labelled event detection."
     )
 
-    markdown_out = (
-        results / "comparison_table.md"
-    )
+    output = folder / "comparison_table.md"
+    output.write_text("\n".join(sections), encoding="utf-8")
 
-    markdown_out.write_text(
-        "\n".join(sections) + "\n",
-        encoding="utf-8"
-    )
-
-    print("\n".join(sections))
-
-    print(
-        f"\nCSV saved to: {csv_out.resolve()}"
-    )
-
-    print(
-        f"Markdown saved to: {markdown_out.resolve()}"
-    )
+    print(f"CSV saved: {folder / 'comparison_table.csv'}")
+    print(f"Markdown saved: {output}")
 
 
 if __name__ == "__main__":
